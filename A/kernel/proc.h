@@ -81,6 +81,28 @@ struct trapframe {
 
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+// Structure to hold information about executable segments for demand paging
+struct seginfo {
+  uint64 vaddr;    // Virtual address where segment starts
+  uint64 filesz;   // Size of segment in file
+  uint64 memsz;    // Size of segment in memory
+  uint64 offset;   // Offset in file
+  int flags;       // Segment permissions
+};
+
+#define MAX_SEGMENTS 4  // Typically: text, rodata, data, bss
+#define MAX_RESIDENT_PAGES 64  // Maximum resident pages per process for FIFO tracking
+#define MAX_SWAP_PAGES 1024  // Maximum pages in swap file (4 MB total)
+
+// Resident page entry for FIFO page replacement
+struct resident_page {
+  uint64 va;           // Virtual address (page-aligned)
+  uint64 seq;          // FIFO sequence number (lower = older)
+  int dirty;           // 1 if page has been written to, 0 if clean
+  int swap_offset;     // Offset in swap file if swapped out (-1 if not in swap)
+  int in_memory;       // 1 if page is in physical memory, 0 if in swap only
+};
+
 // Per-process state
 struct proc {
   struct spinlock lock;
@@ -104,4 +126,30 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  
+  // Demand paging support
+  struct inode *execfile;      // Executable file for demand loading
+  struct seginfo segments[MAX_SEGMENTS]; // Executable segment info
+  int nsegments;               // Number of segments
+  uint64 text_start;           // Start of text segment
+  uint64 text_end;             // End of text segment
+  uint64 data_end;             // End of data segment (before heap)
+  
+  // FIFO page replacement support
+  struct resident_page resident[MAX_RESIDENT_PAGES]; // Resident page set
+  int nresident;               // Number of resident pages
+  uint64 next_seq;             // Next FIFO sequence number to assign
+  
+  // Swap file support (Part 3)
+  struct inode *swapfile;      // Per-process swap file inode
+  char swapname[16];           // Swap file name (e.g., "pgswp00023")
+  uint32 swap_bitmap[32];      // Bitmap for 1024 swap slots (1024 bits = 32 uint32s)
+  int nswapped;                // Number of pages currently in swap
+  
+  // Swap mapping table: tracks which VAs are in which swap slots
+  // Separate from resident[] to avoid corruption when reusing slots
+  struct {
+    uint64 va;                 // Virtual address (-1 if slot unused)
+    int swap_slot;             // Swap slot number
+  } swap_map[MAX_SWAP_PAGES];
 };

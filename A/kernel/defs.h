@@ -24,6 +24,7 @@ void            consputc(int);
 
 // exec.c
 int             kexec(char*, char**);
+int             flags2perm(int);
 
 // file.c
 struct file*    filealloc(void);
@@ -40,6 +41,7 @@ int             dirlink(struct inode*, char*, uint);
 struct inode*   dirlookup(struct inode*, char*, uint*);
 struct inode*   ialloc(uint, short);
 struct inode*   idup(struct inode*);
+struct inode*   create(char*, short, short, short);
 void            iinit();
 void            ilock(struct inode*);
 void            iput(struct inode*);
@@ -169,6 +171,16 @@ int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
 int             ismapped(pagetable_t, uint64);
 uint64          vmfault(pagetable_t, uint64, int);
+void            add_resident_page(uint64, int);
+void            mark_page_dirty(uint64);
+int             find_victim_fifo(void);
+int             evict_page(int);
+int             alloc_swap_slot(void);
+void            free_swap_slot(int);
+int             swap_out(uint64, int);
+int             swap_in(uint64, int);
+int             create_swapfile(void);
+void            close_swapfile(void);
 
 // plic.c
 void            plicinit(void);

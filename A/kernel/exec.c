@@ -7,9 +7,10 @@
 #include "defs.h"
 #include "elf.h"
 
-static int loadseg(pde_t *, uint64, struct inode *, uint, uint);
+//static int loadseg(pde_t *, uint64, struct inode *, uint, uint);
+static int setup_lazy_segment(pagetable_t, uint64, uint64);
 
-// map ELF permissions to PTE permission bits.
+
 int flags2perm(int flags)
 {
     int perm = 0;
@@ -34,6 +35,7 @@ kexec(char *path, char **argv)
   struct proghdr ph;
   pagetable_t pagetable = 0, oldpagetable;
   struct proc *p = myproc();
+  struct inode *new_execfile = 0;  // Will hold reference to new executable file
 
   begin_op();
 
@@ -55,7 +57,18 @@ kexec(char *path, char **argv)
   if((pagetable = proc_pagetable(p)) == 0)
     goto bad;
 
-  // Load program into memory.
+  //  Keep a reference to the new executable file for demand loading
+  // store this temporarily and only commit it if exec succeeds
+  new_execfile = idup(ip);
+  if(new_execfile == 0)
+    goto bad;
+
+  //  Dont load program into memory immediately.
+  // instead, just record segment information for lazy loading on page faults.
+  p->nsegments = 0;
+  p->text_start = 0;
+  p->text_end = 0;
+  
   for(i=0, off=elf.phoff; i<elf.phnum; i++, off+=sizeof(ph)){
     if(readi(ip, 0, (uint64)&ph, off, sizeof(ph)) != sizeof(ph))
       goto bad;
@@ -67,13 +80,36 @@ kexec(char *path, char **argv)
       goto bad;
     if(ph.vaddr % PGSIZE != 0)
       goto bad;
-    uint64 sz1;
-    if((sz1 = uvmalloc(pagetable, sz, ph.vaddr + ph.memsz, flags2perm(ph.flags))) == 0)
+    
+    // Record segment information for demand paging
+    if(p->nsegments >= MAX_SEGMENTS)
       goto bad;
-    sz = sz1;
-    if(loadseg(pagetable, ph.vaddr, ip, ph.off, ph.filesz) < 0)
+    p->segments[p->nsegments].vaddr = ph.vaddr;
+    p->segments[p->nsegments].filesz = ph.filesz;
+    p->segments[p->nsegments].memsz = ph.memsz;
+    p->segments[p->nsegments].offset = ph.off;
+    p->segments[p->nsegments].flags = ph.flags;
+    
+    p->nsegments++;
+    
+    // Just set up page table entries as invalid (not present)
+    // Pages will be allocated and loaded on demand when accessed
+    if(setup_lazy_segment(pagetable, sz, ph.vaddr + ph.memsz) < 0)
       goto bad;
+    
+    // Track text and data boundaries
+    if(ph.flags & 0x1) { // executable segment (text)
+      p->text_start = ph.vaddr;
+      p->text_end = ph.vaddr + ph.memsz;
+    }
+    
+    uint64 sz1 = ph.vaddr + ph.memsz;
+    if(sz1 > sz)
+      sz = sz1;
   }
+  
+  p->data_end = sz;  // End of data segments, beginning of heap
+  
   iunlockput(ip);
   end_op();
   ip = 0;
@@ -81,17 +117,31 @@ kexec(char *path, char **argv)
   p = myproc();
   uint64 oldsz = p->sz;
 
-  // Allocate some pages at the next page boundary.
-  // Make the first inaccessible as a stack guard.
-  // Use the rest as the user stack.
+  //  Allocate stack lazily.
+  // Set up virtual address space for stack, but don't allocate physical pages yet.
+  // Pages will be allocated on first access (page fault).
   sz = PGROUNDUP(sz);
-  uint64 sz1;
-  if((sz1 = uvmalloc(pagetable, sz, sz + (USERSTACK+1)*PGSIZE, PTE_W)) == 0)
+  
+  // Allocate first stack page eagerly to hold arguments
+  // (We need this to copy argv strings before the process starts)
+  char *mem = kalloc();
+  if(mem == 0)
     goto bad;
-  sz = sz1;
-  uvmclear(pagetable, sz-(USERSTACK+1)*PGSIZE);
-  sp = sz;
+  memset(mem, 0, PGSIZE);
+  
+  // Map the first user stack page
+  sp = sz + (USERSTACK+1)*PGSIZE;  // Top of stack
   stackbase = sp - USERSTACK*PGSIZE;
+  if(mappages(pagetable, sp - PGSIZE, PGSIZE, (uint64)mem, PTE_R|PTE_W|PTE_U) != 0){
+    kfree(mem);
+    goto bad;
+  }
+  
+  // Set up guard page (invalid/unmapped)
+  // Note: We don't map the guard page, so it will cause a fault if accessed
+  
+  // Update sz to include the full stack region
+  sz = sz + (USERSTACK+1)*PGSIZE;
 
   // Copy argument strings into new stack, remember their
   // addresses in ustack[].
@@ -130,14 +180,29 @@ kexec(char *path, char **argv)
   // Commit to the user image.
   oldpagetable = p->pagetable;
   p->pagetable = pagetable;
+  
+  // Replace old executable file reference with new one
+  struct inode *old_execfile = p->execfile;
+  p->execfile = new_execfile;  // Set new execfile
+  
   p->sz = sz;
   p->trapframe->epc = elf.entry;  // initial program counter = main
   p->trapframe->sp = sp; // initial stack pointer
   proc_freepagetable(oldpagetable, oldsz);
+  
+  // Now release the old execfile after freeing the old page table
+  if(old_execfile) {
+    iput(old_execfile);
+  }
 
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
  bad:
+  // Clean up on error
+  // Release the new_execfile reference we acquired
+  if(new_execfile) {
+    iput(new_execfile);
+  }
   if(pagetable)
     proc_freepagetable(pagetable, sz);
   if(ip){
@@ -151,23 +216,45 @@ kexec(char *path, char **argv)
 // va must be page-aligned
 // and the pages from va to va+sz must already be mapped.
 // Returns 0 on success, -1 on failure.
-static int
-loadseg(pagetable_t pagetable, uint64 va, struct inode *ip, uint offset, uint sz)
-{
-  uint i, n;
-  uint64 pa;
+// static int
+// loadseg(pagetable_t pagetable, uint64 va, struct inode *ip, uint offset, uint sz)
+// {
+//   uint i, n;
+//   uint64 pa;
 
-  for(i = 0; i < sz; i += PGSIZE){
-    pa = walkaddr(pagetable, va + i);
-    if(pa == 0)
-      panic("loadseg: address should exist");
-    if(sz - i < PGSIZE)
-      n = sz - i;
-    else
-      n = PGSIZE;
-    if(readi(ip, 0, (uint64)pa, offset+i, n) != n)
-      return -1;
-  }
+//   for(i = 0; i < sz; i += PGSIZE){
+//     pa = walkaddr(pagetable, va + i);
+//     if(pa == 0)
+//       panic("loadseg: address should exist");
+//     if(sz - i < PGSIZE)
+//       n = sz - i;
+//     else
+//       n = PGSIZE;
+//     if(readi(ip, 0, (uint64)pa, offset+i, n) != n)
+//       return -1;
+//   }
   
+//  return 0;
+//}
+
+// Setup lazy segment: Reserve virtual address space but don't allocate physical pages.
+// For demand paging, we don't create valid PTEs here. Pages will be allocated
+// and loaded on first access (page fault).
+// Returns 0 on success, -1 on failure.
+static int
+setup_lazy_segment(pagetable_t pagetable, uint64 oldsz, uint64 newsz)
+{
+  
+  // just ensure the page table structure exists 
+  // but leave leaf PTEs invalid. This allows the virtual address space to be
+ 
+  
+  // In xv6, we can simply return success - the walk() function with alloc=1
+  // will create intermediate page tables when needed during page fault handling.
+  
+  // Just validate the sizes
+  if(newsz < oldsz)
+    return -1;
+    
   return 0;
 }

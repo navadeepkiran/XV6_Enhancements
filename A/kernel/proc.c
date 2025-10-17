@@ -140,6 +140,43 @@ found:
     return 0;
   }
 
+  // Initialize demand paging fields
+  p->execfile = 0;
+  p->nsegments = 0;
+  p->text_start = 0;
+  p->text_end = 0;
+  p->data_end = 0;
+  for(int i = 0; i < MAX_SEGMENTS; i++) {
+    p->segments[i].vaddr = 0;
+    p->segments[i].filesz = 0;
+    p->segments[i].memsz = 0;
+    p->segments[i].offset = 0;
+    p->segments[i].flags = 0;
+  }
+  
+  // Initialize FIFO page replacement fields
+  p->nresident = 0;
+  p->next_seq = 0;  // Start sequence numbers at 0
+  
+  // Initialize swap fields
+  p->swapfile = 0;
+  p->nswapped = 0;
+  p->swapname[0] = 0;  // Empty string
+  for(int i = 0; i < 32; i++) {
+    p->swap_bitmap[i] = 0;  // All slots free
+  }
+  for(int i = 0; i < MAX_RESIDENT_PAGES; i++) {
+    p->resident[i].va = 0;
+    p->resident[i].seq = 0;
+    p->resident[i].dirty = 0;
+    p->resident[i].swap_offset = -1;  // Not in swap
+    p->resident[i].in_memory = 0;     // Not allocated yet
+  }
+  for(int i = 0; i < MAX_SWAP_PAGES; i++) {
+    p->swap_map[i].va = (uint64)-1;  // Mark as unused
+    p->swap_map[i].swap_slot = -1;
+  }
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -161,6 +198,18 @@ freeproc(struct proc *p)
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+  
+  // Release executable file inode reference for demand paging
+  if(p->execfile) {
+    iput(p->execfile);
+    p->execfile = 0;
+  }
+  
+  // Close and delete swap file if it exists
+  if(p->swapfile) {
+    close_swapfile();
+  }
+  
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -272,6 +321,18 @@ kfork(void)
     return -1;
   }
   np->sz = p->sz;
+
+  // Copy demand paging metadata from parent to child
+  if(p->execfile) {
+    np->execfile = idup(p->execfile);  // Increment reference count
+  }
+  np->nsegments = p->nsegments;
+  for(i = 0; i < p->nsegments; i++) {
+    np->segments[i] = p->segments[i];  // Copy segment info
+  }
+  np->text_start = p->text_start;
+  np->text_end = p->text_end;
+  np->data_end = p->data_end;
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);

@@ -242,7 +242,7 @@ bad:
   return -1;
 }
 
-static struct inode*
+struct inode*
 create(char *path, short type, short major, short minor)
 {
   struct inode *ip, *dp;
@@ -502,4 +502,18 @@ sys_pipe(void)
     return -1;
   }
   return 0;
+}
+uint64
+sys_sbrklazy(void)
+{
+  uint64 n;
+  struct proc *p = myproc();
+  
+  argaddr(0, &n);
+  
+  uint64 old_sz = p->sz;
+  // Just increase sz without allocating pages
+  p->sz = old_sz + n;
+  
+  return old_sz;  // Return old break
 }

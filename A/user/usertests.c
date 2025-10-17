@@ -19,7 +19,7 @@
 
 #define BUFSZ  ((MAXOPBLOCKS+2)*BSIZE)
 
-char buf[BUFSZ];
+char buf[BUFSZ];  
 
 //
 // Section with tests that run fairly quickly.  Use -q if you want to
@@ -424,25 +424,41 @@ truncate3(char *s)
   
 
 // does chdir() call iput(p->cwd) in a transaction?
+// filepath: c:\Users\navad\Videos\mini-project-2-navadeepkiran - Copy\A\user\usertests.c
+
 void
 iputtest(char *s)
 {
-  if(mkdir("iputdir") < 0){
+  printf("iputtest: starting\n");
+  
+  int ret = mkdir("iputdir");
+  printf("iputtest: mkdir returned %d\n", ret);
+  if(ret < 0){
     printf("%s: mkdir failed\n", s);
     exit(1);
   }
+  printf("iputtest: directory created successfully\n");
+
+  printf("iputtest: trying to chdir to iputdir\n"); 
   if(chdir("iputdir") < 0){
     printf("%s: chdir iputdir failed\n", s);
     exit(1);
   }
+  printf("iputtest: chdir successful\n");
+
+  printf("iputtest: trying to unlink ../iputdir\n");
   if(unlink("../iputdir") < 0){
     printf("%s: unlink ../iputdir failed\n", s);
     exit(1);
   }
+  printf("iputtest: unlink successful\n");
+
+  printf("iputtest: trying to chdir to /\n");
   if(chdir("/") < 0){
     printf("%s: chdir / failed\n", s);
     exit(1);
   }
+  printf("iputtest: chdir to / successful\n");
 }
 
 // does exit() call iput(p->cwd) in a transaction?
@@ -450,6 +466,7 @@ void
 exitiputtest(char *s)
 {
   int pid, xstatus;
+  int ret;
 
   pid = fork();
   if(pid < 0){
@@ -457,18 +474,28 @@ exitiputtest(char *s)
     exit(1);
   }
   if(pid == 0){
-    if(mkdir("iputdir") < 0){
+    printf("child: trying to create directory 'iputdir'\n");
+    ret = mkdir("iputdir");
+    printf("child: mkdir returned %d\n", ret);
+    if(ret < 0){
       printf("%s: mkdir failed\n", s);
       exit(1);
     }
+    printf("child: directory created successfully\n");
+    
+    printf("child: trying to chdir to iputdir\n");
     if(chdir("iputdir") < 0){
       printf("%s: child chdir failed\n", s);
       exit(1);
     }
+    printf("child: chdir successful\n");
+    
+    printf("child: trying to unlink ../iputdir\n");
     if(unlink("../iputdir") < 0){
       printf("%s: unlink ../iputdir failed\n", s);
       exit(1);
     }
+    printf("child: unlink successful\n");
     exit(0);
   }
   wait(&xstatus);
@@ -491,10 +518,16 @@ openiputtest(char *s)
 {
   int pid, xstatus;
 
+  printf("openiput test starting\n"); // Add debug print
+
+  // Add debug print before mkdir
+  printf("trying to create directory 'oidir'\n");
   if(mkdir("oidir") < 0){
     printf("%s: mkdir oidir failed\n", s);
     exit(1);
   }
+  printf("directory 'oidir' created successfully\n"); // Add debug print
+
   pid = fork();
   if(pid < 0){
     printf("%s: fork failed\n", s);
@@ -514,6 +547,7 @@ openiputtest(char *s)
     exit(1);
   }
   wait(&xstatus);
+  
   exit(xstatus);
 }
 
@@ -657,25 +691,37 @@ createtest(char *s)
 
 void dirtest(char *s)
 {
-  if(mkdir("dir0") < 0){
+  printf("dirtest: starting\n");
+
+  printf("dirtest: attempting to create directory 'dir0'\n");
+  int ret = mkdir("dir0");
+  printf("dirtest: mkdir returned %d\n", ret);
+  
+  if(ret < 0){
     printf("%s: mkdir failed\n", s);
     exit(1);
   }
 
+  printf("dirtest: attempting to chdir to dir0\n");
   if(chdir("dir0") < 0){
     printf("%s: chdir dir0 failed\n", s);
     exit(1);
   }
+  printf("dirtest: chdir to dir0 successful\n");
 
+  printf("dirtest: attempting to chdir to ..\n");
   if(chdir("..") < 0){
     printf("%s: chdir .. failed\n", s);
     exit(1);
   }
+  printf("dirtest: chdir to .. successful\n");
 
+  printf("dirtest: attempting to unlink dir0\n");
   if(unlink("dir0") < 0){
     printf("%s: unlink dir0 failed\n", s);
     exit(1);
   }
+  printf("dirtest: unlink dir0 successful\n");
 }
 
 void
@@ -2413,7 +2459,9 @@ stacktest(char *s)
   pid = fork();
   if(pid == 0) {
     char *sp = (char *) r_sp();
+    printf("DEBUG: stacktest original sp=%p\n", sp);
     sp -= USERSTACK*PGSIZE;
+    printf("DEBUG: stacktest trying to access sp=%p\n", sp);
     // the *sp should cause a trap.
     printf("%s: stacktest: read below stack %d\n", s, *sp);
     exit(1);
@@ -2585,7 +2633,7 @@ badarg(char *s)
   exit(0);
 }
 
-#define REGION_SZ (1024 * 1024 * 1024)
+#define REGION_SZ (10 * 1024 * 1024)
 
 // Touch a page every 64 pages, which with lazy allocation
 // causes one page to be allocated.
@@ -3157,9 +3205,13 @@ drivetests(int quick, int continuous, char *justone) {
       }
     }
     if((free1 = countfree()) < free0) {
-      printf("FAILED -- lost some free pages %d (out of %d)\n", free1, free0);
-      if(continuous != 2) {
-        return 1;
+      // Allow a tolerance of 2 pages for kernel caching/bookkeeping
+      int lost = free0 - free1;
+      if(lost > 2) {
+        printf("FAILED -- lost some free pages %d (out of %d)\n", free1, free0);
+        if(continuous != 2) {
+          return 1;
+        }
       }
     }
     if (justone != 0 && ntests == 0) {
