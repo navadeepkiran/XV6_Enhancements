@@ -158,6 +158,9 @@ found:
   p->nresident = 0;
   p->next_seq = 0;  // Start sequence numbers at 0
   
+  // Initialize Second Chance  algorithm fields
+  p->clock_hand = 0;  // Start at first position
+  
   // Initialize swap fields
   p->swapfile = 0;
   p->nswapped = 0;

@@ -174,6 +174,7 @@ uint64          vmfault(pagetable_t, uint64, int);
 void            add_resident_page(uint64, int);
 void            mark_page_dirty(uint64);
 int             find_victim_fifo(void);
+int             find_victim_second_chance(void); // Bonus: Second Chance algorithm
 int             evict_page(int);
 int             alloc_swap_slot(void);
 void            free_swap_slot(int);

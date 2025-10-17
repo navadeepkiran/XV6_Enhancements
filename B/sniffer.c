@@ -126,21 +126,16 @@ void analyze_packet(const struct pcap_pkthdr *header, const u_char *packet, int 
         return;
     }
 
-    switch (eth_type) {
-        case ETHERTYPE_IP:
-            printf(" | EtherType: IPv4 (0x%04x)\n", eth_type);
-            analyze_ip_packet(next_layer_packet);
-            break;
-        case ETHERTYPE_ARP:
-            printf(" | EtherType: ARP (0x%04x)\n", eth_type);
-            analyze_arp_packet(next_layer_packet);
-            break;
-        case ETHERTYPE_IPV6:
-            printf(" | EtherType: IPv6 (0x%04x)\n", eth_type);
-            break;
-        default:
-            printf(" | EtherType: Unknown (0x%04x)\n", eth_type);
-            break;
+    if (eth_type == ETHERTYPE_IP) {
+        printf(" | EtherType: IPv4 (0x%04x)\n", eth_type);
+        analyze_ip_packet(next_layer_packet);
+    } else if (eth_type == ETHERTYPE_ARP) {
+        printf(" | EtherType: ARP (0x%04x)\n", eth_type);
+        analyze_arp_packet(next_layer_packet);
+    } else if (eth_type == ETHERTYPE_IPV6) {
+        printf(" | EtherType: IPv6 (0x%04x)\n", eth_type);
+    } else {
+        printf(" | EtherType: Unknown (0x%04x)\n", eth_type);
     }
 }
 
@@ -159,11 +154,14 @@ void analyze_ip_packet(const u_char *packet) {
     int ip_payload_len = ip_total_len - ip_header_len;
 
     // Print the correct protocol name
-    switch (ip_header->ip_p) {
-        case IPPROTO_TCP: printf("TCP (%d)", ip_header->ip_p); break;
-        case IPPROTO_UDP: printf("UDP (%d)", ip_header->ip_p); break;
-        case IPPROTO_ICMP: printf("ICMP (%d)", ip_header->ip_p); break;
-        default: printf("Unknown (%d)", ip_header->ip_p); break;
+    if (ip_header->ip_p == IPPROTO_TCP) {
+        printf("TCP (%d)", ip_header->ip_p);
+    } else if (ip_header->ip_p == IPPROTO_UDP) {
+        printf("UDP (%d)", ip_header->ip_p);
+    } else if (ip_header->ip_p == IPPROTO_ICMP) {
+        printf("ICMP (%d)", ip_header->ip_p);
+    } else {
+        printf("Unknown (%d)", ip_header->ip_p);
     }
     
     printf(" | TTL: %d\n", ip_header->ip_ttl);
@@ -171,13 +169,10 @@ void analyze_ip_packet(const u_char *packet) {
            ntohs(ip_header->ip_id), ip_total_len, ip_header_len);
 
     // Now analyze Layer 4
-    switch (ip_header->ip_p) {
-        case IPPROTO_TCP:
-            analyze_tcp_segment(transport_layer_packet, ip_payload_len);
-            break;
-        case IPPROTO_UDP:
-            analyze_udp_datagram(transport_layer_packet);
-            break;
+    if (ip_header->ip_p == IPPROTO_TCP) {
+        analyze_tcp_segment(transport_layer_packet, ip_payload_len);
+    } else if (ip_header->ip_p == IPPROTO_UDP) {
+        analyze_udp_datagram(transport_layer_packet);
     }
 }
 

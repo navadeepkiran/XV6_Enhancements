@@ -91,7 +91,7 @@ struct seginfo {
 };
 
 #define MAX_SEGMENTS 4  // Typically: text, rodata, data, bss
-#define MAX_RESIDENT_PAGES 64  // Maximum resident pages per process for FIFO tracking
+#define MAX_RESIDENT_PAGES 8  // Maximum resident pages per process for FIFO tracking
 #define MAX_SWAP_PAGES 1024  // Maximum pages in swap file (4 MB total)
 
 // Resident page entry for FIFO page replacement
@@ -101,6 +101,7 @@ struct resident_page {
   int dirty;           // 1 if page has been written to, 0 if clean
   int swap_offset;     // Offset in swap file if swapped out (-1 if not in swap)
   int in_memory;       // 1 if page is in physical memory, 0 if in swap only
+  int ref_bit;         // Reference bit for Second Chance algorithm (1 = recently used)
 };
 
 // Per-process state
@@ -139,6 +140,9 @@ struct proc {
   struct resident_page resident[MAX_RESIDENT_PAGES]; // Resident page set
   int nresident;               // Number of resident pages
   uint64 next_seq;             // Next FIFO sequence number to assign
+  
+  // Second Chance algorithm support
+  int clock_hand;              // Clock hand position for second chance algorithm
   
   // Swap file support (Part 3)
   struct inode *swapfile;      // Per-process swap file inode

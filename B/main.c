@@ -4,9 +4,20 @@
 #include <pcap.h>
 #include "sniffer.h"
 #include <signal.h>
+#include <stdbool.h>
 
 #define MAX_DEVICES 20
 #define MAX_DEVICE_NAME_LEN 100
+
+static volatile bool ctrl_c_pressed = false;
+
+void handle_ctrl_c(int sig) {
+    ctrl_c_pressed = true;
+}
+
+void setup_signal_handlers() {
+    signal(SIGINT, handle_ctrl_c);
+}
 
 
 void print_main_menu(const char *device);
@@ -99,14 +110,21 @@ void handle_filtering(const char *selected_device) {
         return;
     }
     
-    switch(choice) {
-        case 1: filter_exp = "tcp"; break;
-        case 2: filter_exp = "udp"; break;
-        case 3: filter_exp = "arp"; break;
-        case 4: filter_exp = "udp port 53"; break;
-        case 5: filter_exp = "tcp port 80"; break;
-        case 6: filter_exp = "tcp port 443"; break;
-        default: printf("Invalid filter option.\n"); return;
+    if (choice == 1) {
+        filter_exp = "tcp";
+    } else if (choice == 2) {
+        filter_exp = "udp";
+    } else if (choice == 3) {
+        filter_exp = "arp";
+    } else if (choice == 4) {
+        filter_exp = "udp port 53";
+    } else if (choice == 5) {
+        filter_exp = "tcp port 80";
+    } else if (choice == 6) {
+        filter_exp = "tcp port 443";
+    } else {
+        printf("Invalid filter option.\n");
+        return;
     }
 
     start_filtered_sniffing(selected_device, filter_exp);
@@ -114,6 +132,8 @@ void handle_filtering(const char *selected_device) {
 
 // Main Program Loop 
 int main() {
+    setup_signal_handlers();
+    
     const char *selected_device = select_device();
     if (selected_device == NULL) {
         return 1;
@@ -121,6 +141,7 @@ int main() {
 
     int choice = 0;
     while (1) {
+        ctrl_c_pressed = false;
         print_main_menu(selected_device);
         
         char input_buffer[16];
@@ -135,23 +156,26 @@ int main() {
             continue;
         }
 
-        switch (choice) {
-            case 1:
-                start_sniffing(selected_device);
-                break;
-            case 2:
-                handle_filtering(selected_device);
-                break;
-            case 3:
-                inspect_session();
-                break;
-            case 4:
-                printf("\n[C-Shark] Goodbye!\n");
-                clear_session(); 
-                return 0;
-            default:
-                printf("Invalid option. Please choose between 1 and 4.\n");
-                break;
+        if (choice == 1) {
+            start_sniffing(selected_device);
+            if (ctrl_c_pressed) {
+                printf("\n[C-Shark] Returning to main menu...\n");
+                ctrl_c_pressed = false;
+            }
+        } else if (choice == 2) {
+            handle_filtering(selected_device);
+            if (ctrl_c_pressed) {
+                printf("\n[C-Shark] Returning to main menu...\n");
+                ctrl_c_pressed = false;
+            }
+        } else if (choice == 3) {
+            inspect_session();
+        } else if (choice == 4) {
+            printf("\n[C-Shark] Goodbye!\n");
+            clear_session(); 
+            return 0;
+        } else {
+            printf("Invalid option. Please choose between 1 and 4.\n");
         }
     }
     

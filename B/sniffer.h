@@ -11,7 +11,7 @@ typedef struct {
     u_char *data;              // A deep copy of the packet's raw data
 } captured_packet;
 
-// --- Function Prototypes ---
+/
 
 // Core sniffing functions
 void start_sniffing(const char *device);

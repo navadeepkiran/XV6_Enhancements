@@ -12,6 +12,21 @@
 #include "stat.h"
 #include "fcntl.h"
 
+
+// Page Replacement Algorithm Configuration
+// Set to 1 to use Second Chance (Clock) algorithm
+// Set to 0 to use FIFO algorithm 
+#define USE_SECOND_CHANCE 0
+
+// helper function to select 
+static inline int find_victim(void) {
+#if USE_SECOND_CHANCE
+  return find_victim_second_chance();
+#else
+  return find_victim_fifo();
+#endif
+}
+
 /*
  * the kernel's page table.
  */
@@ -585,10 +600,10 @@ vmfault(pagetable_t pagetable, uint64 va, int write)
       // Allocate physical page
       mem = (uint64)kalloc();
       if(mem == 0) {
-        // Out of physical memory - need to evict a page using FIFO
+        // Out of physical memory - need to evict a page
         printf("MEMFULL pid=%d\n", p->pid);
         
-        int victim_idx = find_victim_fifo();
+        int victim_idx = find_victim();
         if(victim_idx < 0) {
           // No pages to evict - process must terminate
          // printf("PAGEFAULT pid=%d va=0x%lx FATAL: out of memory, no pages to evict\n", p->pid, va_aligned);
@@ -687,10 +702,10 @@ vmfault(pagetable_t pagetable, uint64 va, int write)
     // Stack page - allocate zero-filled
     mem = (uint64)kalloc();
     if(mem == 0) {
-      // Out of physical memory - need to evict a page using FIFO
+      // Out of physical memory - need to evict a page
       printf("MEMFULL pid=%d\n", p->pid);
       
-      int victim_idx = find_victim_fifo();
+      int victim_idx = find_victim();
       if(victim_idx < 0) {
        // printf("PAGEFAULT pid=%d va=0x%lx FATAL: out of memory, no pages to evict\n", p->pid, va_aligned);
         return 0;
@@ -769,6 +784,7 @@ vmfault(pagetable_t pagetable, uint64 va, int write)
         p->resident[resident_idx].seq = p->next_seq++;
         p->resident[resident_idx].dirty = write ? 1 : 0;
         p->resident[resident_idx].swap_offset = -1;  // Clear swap offset since it's back in memory
+        p->resident[resident_idx].ref_bit = 1;  // Mark as recently used
         
         // Return the physical address
         pte_t *pte = walk(pagetable, va_aligned, 0);
@@ -783,10 +799,10 @@ vmfault(pagetable_t pagetable, uint64 va, int write)
   // Heap page not in swap - allocate zero-filled
     mem = (uint64)kalloc();
     if(mem == 0) {
-      // Out of physical memory - need to evict a page using FIFO
+      // Out of physical memory - need to evict a page
       printf("MEMFULL pid=%d\n", p->pid);
       
-      int victim_idx = find_victim_fifo();
+      int victim_idx = find_victim();
       if(victim_idx < 0) {
         //printf("PAGEFAULT pid=%d va=0x%lx FATAL: out of memory, no pages to evict\n", p->pid, va_aligned);
         return 0;
@@ -868,6 +884,7 @@ add_resident_page(uint64 va, int writable)
     p->resident[p->nresident].dirty = 0;  // Initially clean
     p->resident[p->nresident].swap_offset = -1;  // Not in swap
     p->resident[p->nresident].in_memory = 1;  // In physical memory
+    p->resident[p->nresident].ref_bit = 1;  // Mark as recently used
     p->nresident++;
     
     // Log page becoming resident
@@ -877,7 +894,7 @@ add_resident_page(uint64 va, int writable)
     // Resident set is full - need to evict a page before adding new one
     printf("[pid %d] MEMFULL\n", p->pid);
     
-    int victim_idx = find_victim_fifo();
+    int victim_idx = find_victim();
     if(victim_idx < 0) {
       // No victim available - can't make room. Kill the process instead of panicking.
       printf("[pid %d] add_resident_page: no victim found, killing process\n", p->pid);
@@ -898,6 +915,7 @@ add_resident_page(uint64 va, int writable)
     p->resident[p->nresident].dirty = 0;
     p->resident[p->nresident].swap_offset = -1;
     p->resident[p->nresident].in_memory = 1;
+    p->resident[p->nresident].ref_bit = 1;  // Mark as recently used
     p->nresident++;
     
     // Log page becoming resident
@@ -917,6 +935,7 @@ mark_page_dirty(uint64 va)
   for(int i = 0; i < p->nresident; i++) {
     if(p->resident[i].va == va_aligned) {
       p->resident[i].dirty = 1;
+      p->resident[i].ref_bit = 1;  // Mark as recently used (for Second Chance)
       return;
     }
   }
@@ -952,6 +971,103 @@ find_victim_fifo(void)
   // Log the victim selection (Part 4 format)
   printf("[pid %d] VICTIM va=0x%lx seq=%ld algo=FIFO\n", 
           p->pid, p->resident[victim_idx].va, p->resident[victim_idx].seq);
+  
+  return victim_idx;
+}
+
+
+// Find victim page using Second Chance  algorithm
+// This algorithm gives pages a "second chance" before eviction by checking
+// the PTE_A accessed bit. It sweeps through resident pages in circular order:
+//  If page has PTE_A set clear it and give page a second chance
+//  If page has PTE_A clear select it as victim
+// Returns index in resident[] array or -1 if no victim found
+int
+find_victim_second_chance(void)
+{
+  struct proc *p = myproc();
+  
+  if(p->nresident == 0) {
+    return -1;  // No resident pages to evict
+  }
+  
+  // Count in-memory pages
+  int in_memory_count = 0;
+  for(int i = 0; i < p->nresident; i++) {
+    if(p->resident[i].in_memory) {
+      in_memory_count++;
+    }
+  }
+  
+  if(in_memory_count == 0) {
+    return -1;  // No in-memory pages to evict
+  }
+  
+  // Initialize clock hand if not set or out of bounds
+  if(p->clock_hand < 0 || p->clock_hand >= p->nresident) {
+    p->clock_hand = 0;
+  }
+  
+  // Second chance algorithm: sweep through resident pages
+  // Make at most 2 full passes to find a victim
+  int max_sweeps = 2 * p->nresident;
+  int sweeps = 0;
+  int victim_idx = -1;
+  
+  while(sweeps < max_sweeps) {
+    // Skip pages not in memory
+    if(!p->resident[p->clock_hand].in_memory) {
+      p->clock_hand = (p->clock_hand + 1) % p->nresident;
+      sweeps++;
+      continue;
+    }
+    
+    uint64 va = p->resident[p->clock_hand].va;
+    pte_t *pte = walk(p->pagetable, va, 0);
+    
+    if(pte == 0 || (*pte & PTE_V) == 0) {
+      // Page not mapped - can be evicted immediately
+      victim_idx = p->clock_hand;
+      break;
+    }
+    
+    // Check the software reference bit
+    if(p->resident[p->clock_hand].ref_bit) {
+      // Page was referenced recently - clear ref bit and give second chance
+      p->resident[p->clock_hand].ref_bit = 0;  // Clear reference bit
+      p->clock_hand = (p->clock_hand + 1) % p->nresident;
+      sweeps++;
+    } else {
+      // Page has not been referenced since last check - select as victim
+      victim_idx = p->clock_hand;
+      break;
+    }
+  }
+  
+  // If we couldn't find a victim  fall back to first in-memory page
+  if(victim_idx < 0) {
+    for(int i = 0; i < p->nresident; i++) {
+      if(p->resident[i].in_memory) {
+        victim_idx = i;
+        break;
+      }
+    }
+  }
+  
+  if(victim_idx < 0) {
+    return -1;  // No victim found
+  }
+  
+  // Log the victim selection
+  // Include seq for compatibility and clock_hand position
+  printf("[pid %d] VICTIM va=0x%lx seq=%ld algo=SecondChance clock_pos=%d\n", 
+          p->pid, p->resident[victim_idx].va, p->resident[victim_idx].seq, p->clock_hand);
+  
+  // Advance clock hand for next eviction
+  p->clock_hand = (p->clock_hand + 1) % p->nresident;
+  if(p->nresident == 1) {
+    p->clock_hand = 0;  // Will be adjusted after eviction
+  }
   
   return victim_idx;
 }
@@ -1011,23 +1127,31 @@ remove_from_resident:
   }
   p->nresident--;
   
+  // Adjust clock_hand if needed for Second Chance algorithm
+  if(p->clock_hand > idx) {
+    // Clock hand was pointing past the evicted page, shift it back
+    p->clock_hand--;
+  } else if(p->clock_hand == idx && p->nresident > 0) {
+    // Clock hand was pointing at evicted page, keep it at same position
+    // points to the next page
+    //  wrap around if out  of bounds
+    if(p->clock_hand >= p->nresident) {
+      p->clock_hand = 0;
+    }
+  } else if(p->nresident == 0) {
+    p->clock_hand = 0;
+  }
+  
   return 0;
 }
 
-// ============================================================================
-// SWAP FILE FUNCTIONS (Part 3)
-// ============================================================================
 
-// Create per-process swap file
-// Returns 0 on success, -1 on failure
 int
 create_swapfile(void)
 {
   struct proc *p = myproc();
   
-  // Generate unique swap file name using PID
-  // Format: "pgswpXXXXX" where XXXXX is the 5-digit PID
-  // Manually construct the filename since xv6 doesn't have snprintf
+
   p->swapname[0] = 'p';
   p->swapname[1] = 'g';
   p->swapname[2] = 's';
@@ -1137,7 +1261,7 @@ free_swap_slot(int slot)
   p->swap_bitmap[word_idx] &= ~mask;
 }
 
-// Write a page to swap file (called during eviction)
+// Write a page to swap file
 // va: virtual address of the page to swap out
 // resident_idx: index in the resident set
 // Returns 0 on success, -1 on failure
@@ -1221,7 +1345,7 @@ swap_in(uint64 va, int slot)
   char *mem = kalloc();
   if(mem == 0) {
     // Try to evict a page to make room
-    int victim_idx = find_victim_fifo();
+    int victim_idx = find_victim();
     if(victim_idx < 0 || evict_page(victim_idx) < 0) {
       return -1;
     }
