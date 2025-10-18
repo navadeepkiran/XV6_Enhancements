@@ -50,8 +50,8 @@ Queue g_waiting_to_pay;
 
 Customerstate* g_customer_states_head = NULL;
 
-time_t g_start_time;
-volatile int g_all_customers_arrived = 0;
+struct timespec g_start_time;
+int g_all_customers_arrived = 0;
 
 void init_queue(Queue *q){
     q->front=NULL;
@@ -59,10 +59,6 @@ void init_queue(Queue *q){
 }
 void enqueue(Queue *q,int id){
     QueueNode * temp=(QueueNode*)malloc(sizeof(QueueNode));
-    if (temp == NULL) {
-        // Memory allocation failed - this is a critical error
-        return;
-    }
     temp->customer_id=id;
     temp->next=NULL;
     if(q->rear==NULL){
@@ -93,7 +89,6 @@ int is_empty(Queue * q){
 }
 
 Customerstate * find_customerstate(int customer_id){
-   
     Customerstate* current = g_customer_states_head;
     while(current!=NULL){
         if(current->id == customer_id){
@@ -101,12 +96,8 @@ Customerstate * find_customerstate(int customer_id){
         }
         current=current->next;
     }
-    // create new state - safe because mutex is held
+    // create
     Customerstate * new=(Customerstate*)malloc(sizeof(Customerstate));
-    if (new == NULL) {
-        // Memory allocation failed
-        return NULL;
-    }
     new->id=customer_id;
     new->cakeisready=0;
     new->paymentaccepted=0;
@@ -115,8 +106,9 @@ Customerstate * find_customerstate(int customer_id){
     return new;
 }
 void print(char * name,int id,char * activity,char * details){
-    time_t now = time(NULL);
-    long timestamp = (long)(now - g_start_time);
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long timestamp = now.tv_sec - g_start_time.tv_sec;
     pthread_mutex_lock(&g_cout_mutex);
     printf("%ld %s %d %s%s\n",timestamp,name,id,activity,details);
     fflush(stdout);
@@ -128,20 +120,18 @@ void * chef_function(void * arg){
     free(arg);
     while(1){
          pthread_mutex_lock(&g_bakery_mutex);
-         // Chef waits if there is nothing to do.
+         // Chef waits if there's nothing to do.
         while (is_empty(&g_waiting_to_pay) && is_empty(&g_waiting_for_cake) && !g_all_customers_arrived) {
             pthread_cond_wait(&g_cv_customer_event, &g_bakery_mutex);
         }
         
-        // Check termination ball customers arrived, no one in shop, and no pending work
-        if (g_all_customers_arrived && g_total == 0 && 
-            is_empty(&g_waiting_to_pay) && is_empty(&g_waiting_for_cake)) {
+        if (g_all_customers_arrived && g_total == 0) {
             pthread_mutex_unlock(&g_bakery_mutex);
             break; // Exit the loop to terminate the thread
         }
         int customer_id = -1;
         int is_paying = 0;
-               // Priority 1 Accept Payment
+               // Priority 1: Accept Payment
         if (!is_empty(&g_waiting_to_pay)) {
             customer_id = dequeue(&g_waiting_to_pay);
             is_paying = 1;
@@ -160,17 +150,11 @@ void * chef_function(void * arg){
                 snprintf(details, sizeof(details), " Customer %d", customer_id);
                 print("Chef", chef_id, "accepts payment for", details);
                 sleep(2); // Payment takes 2 seconds
-                
-                // Lock bakery mutex before modifying state and broadcasting
-                pthread_mutex_lock(&g_bakery_mutex);
-                Customerstate * temp=find_customerstate(customer_id);
-                if (temp != NULL) {
-                    temp->paymentaccepted=1;
-                }
                 pthread_cond_broadcast(&g_cv_customer_specific_event);
                 pthread_mutex_unlock(&g_bakery_mutex);
-                
                 pthread_mutex_unlock(&g_payment_mutex);
+                Customerstate * temp=find_customerstate(customer_id);
+                temp->paymentaccepted=1;
             }
             else{
                  char details[50];
@@ -180,21 +164,15 @@ void * chef_function(void * arg){
 
                 pthread_mutex_lock(&g_bakery_mutex);
                 Customerstate * temp=find_customerstate(customer_id);
-                if (temp != NULL) {
-                    temp->cakeisready=1;
-                }
-                // Notify all customers the correct one will wake up and check its state
-                pthread_cond_broadcast(&g_cv_customer_specific_event);
-                pthread_mutex_unlock(&g_bakery_mutex);
+                temp->cakeisready=1;
             }
+            // Notify all customers; the correct one will wake up and check its state
+
+            pthread_cond_broadcast(&g_cv_customer_specific_event);
+             pthread_mutex_unlock(&g_bakery_mutex);
         }
           else {
-             // No customer found to serve, but check termination before looping
-             if (g_all_customers_arrived && g_total == 0 &&
-                 is_empty(&g_waiting_to_pay) && is_empty(&g_waiting_for_cake)) {
-                 pthread_mutex_unlock(&g_bakery_mutex);
-                 break;
-             }
+             // This else handles the path where no customer was found
              pthread_mutex_unlock(&g_bakery_mutex);
          }
          // There is no extra unlock here. The loop restarts correctly.
@@ -203,13 +181,14 @@ void * chef_function(void * arg){
 }
 
 void * customer_function(void * arg){
-    CustomerArgs* args=(CustomerArgs*)arg; // id timestamp
+    CustomerArgs* args=(CustomerArgs*)arg; // id,timestamp
     int customer_id=args->id;
     int arrival_timestamp=args->arrival_timestamp;
     free(arg);
-        // Wait until the customer is designated arrival time
-    time_t now = time(NULL);
-    long current_time = (long)(now - g_start_time);
+        // Wait until the customer's designated arrival time
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long current_time = now.tv_sec - g_start_time.tv_sec;
     if (arrival_timestamp > current_time) {
         sleep(arrival_timestamp - current_time);
     }
@@ -242,10 +221,6 @@ void * customer_function(void * arg){
     // get cake
     pthread_mutex_lock(&g_bakery_mutex);
     Customerstate* my_state = find_customerstate(customer_id);
-    if (my_state == NULL) {
-        pthread_mutex_unlock(&g_bakery_mutex);
-        return NULL;
-    }
     my_state->cakeisready = 0;
     enqueue(&g_waiting_for_cake, customer_id);
     print("Customer", customer_id, "requests cake", "");
@@ -254,13 +229,14 @@ void * customer_function(void * arg){
         pthread_cond_wait(&g_cv_customer_specific_event, &g_bakery_mutex);
     }
     pthread_mutex_unlock(&g_bakery_mutex);
-   
+    // No sleep here per problem description
 
     // pay
     pthread_mutex_lock(&g_bakery_mutex);
     my_state->paymentaccepted = 0;
     enqueue(&g_waiting_to_pay, customer_id);
     print("Customer", customer_id, "pays", "");
+    //sleep(1);
     pthread_cond_signal(&g_cv_customer_event); // Wake one chef
     pthread_mutex_unlock(&g_bakery_mutex);
     sleep(1);
@@ -274,9 +250,15 @@ void * customer_function(void * arg){
     // get lost
 
     pthread_mutex_lock(&g_bakery_mutex);
-    print("Customer", customer_id, "leaves", "");
     g_total--;
     g_sofa--;
+    print("Customer", customer_id, "leaves", "");
+    pthread_mutex_unlock(&g_bakery_mutex);
+    
+    // Delay to ensure "leaves" and "sits" don't happen in the same second
+    sleep(1);
+    
+    pthread_mutex_lock(&g_bakery_mutex);
     pthread_cond_signal(&g_cv_sofa_seat_available); // Signal one standing customer
     pthread_mutex_unlock(&g_bakery_mutex);
 
@@ -321,38 +303,30 @@ int main(){
         
         if (first_timestamp == -1) {
             first_timestamp = timestamp;
-            g_start_time = time(NULL);
+            clock_gettime(CLOCK_MONOTONIC, &g_start_time);
             // Adjust start time to match first customer's arrival
-            g_start_time -= first_timestamp;
+            g_start_time.tv_sec -= first_timestamp;
         }
         CustomerArgs* args = (CustomerArgs*)malloc(sizeof(CustomerArgs));
         args->id = id;
         args->arrival_timestamp = timestamp;
         pthread_create(&customer_threads[customer_count++], NULL, customer_function, args);
     }
-    
-    // If no customers were created, initialize start time anyway
-    if (first_timestamp == -1) {
-        g_start_time = time(NULL);
-    }
-    
     // Wait for all customer threads to finish
     for (int i = 0; i < customer_count; ++i) {
         pthread_join(customer_threads[i], NULL);
     }
-    
     // Signal to chefs that no more new customers will arrive
     pthread_mutex_lock(&g_bakery_mutex);
     g_all_customers_arrived = 1;
-    pthread_cond_broadcast(&g_cv_customer_event);
+    pthread_cond_broadcast(&g_cv_customer_event); // Wake all chefs to check shutdown condition
     pthread_mutex_unlock(&g_bakery_mutex);
 
-    // Wait for all chef threads to finish
+        // Wait for all chef threads to finish
     for (int i = 0; i < NUM_CHEFS; ++i) {
         pthread_join(chef_threads[i], NULL);
     }
-    
-    // Cleanup
+        // Cleanup
     pthread_mutex_destroy(&g_bakery_mutex);
     pthread_mutex_destroy(&g_payment_mutex);
     pthread_mutex_destroy(&g_cout_mutex);
@@ -367,6 +341,5 @@ int main(){
         current = current->next;
         free(temp);
     }
-    
     return 0;
 }
